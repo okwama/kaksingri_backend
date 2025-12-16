@@ -1,0 +1,822 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ==================== AUTH & USERS ====================
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  password  String
+  name      String
+  role      UserRole @default(VIEWER)
+  avatar    String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  orders        Order[]
+  salesTeam     SalesTeamMember?
+  notifications Notification[]
+
+  @@map("users")
+}
+
+enum UserRole {
+  SUPER_ADMIN
+  ADMIN
+  MANAGER
+  VIEWER
+}
+
+// ==================== PRODUCTS ====================
+
+model Category {
+  id          String    @id @default(cuid())
+  name        String
+  slug        String    @unique
+  description String?
+  image       String?
+  parentId    String?
+  parent      Category? @relation("CategoryTree", fields: [parentId], references: [id], onDelete: Cascade)
+  children    Category[] @relation("CategoryTree")
+  isActive    Boolean   @default(true)
+  sortOrder   Int       @default(0)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  products    Product[]
+
+  @@map("categories")
+}
+
+model Product {
+  id          String   @id @default(cuid())
+  name        String
+  slug        String   @unique
+  sku         String   @unique
+  description String?  @db.Text
+  price       Decimal  @db.Decimal(10, 2)
+  comparePrice Decimal? @db.Decimal(10, 2)
+  cost        Decimal? @db.Decimal(10, 2)
+  categoryId  String
+  category    Category @relation(fields: [categoryId], references: [id])
+  images      String[] // Array of image URLs
+  tags        String[] // Array of tags
+  isActive    Boolean  @default(true)
+  isFeatured  Boolean  @default(false)
+  trackInventory Boolean @default(true)
+  weight      Decimal? @db.Decimal(8, 2)
+  dimensions  Json?    // {length, width, height}
+  metadata    Json?    // Additional flexible data
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  inventoryItems InventoryItem[]
+  orderItems     OrderItem[]
+  quoteItems     QuoteItem[]
+  poItems        PurchaseOrderItem[]
+  stockMovements StockMovement[]
+  transferItems  StockTransferItem[]
+  analytics      ProductAnalytics[]
+  reviews        ProductReview[]
+
+  @@map("products")
+}
+
+// ==================== INVENTORY ====================
+
+model Warehouse {
+  id          String   @id @default(cuid())
+  name        String
+  address     String?
+  isDefault   Boolean  @default(false)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  inventoryItems InventoryItem[]
+  transfersOut   StockTransfer[] @relation("SourceWarehouse")
+  transfersIn    StockTransfer[] @relation("DestinationWarehouse")
+
+  @@map("warehouses")
+}
+
+model InventoryItem {
+  id            String   @id @default(cuid())
+  productId     String
+  product       Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  sku           String   @unique
+  warehouseId   String?
+  warehouse     Warehouse? @relation(fields: [warehouseId], references: [id], onDelete: SetNull)
+  location      String?  // Legacy field, kept for backward compatibility
+  quantity      Int      @default(0)
+  reservedQty   Int      @default(0) // Reserved for orders
+  reorderPoint  Int      @default(0)
+  reorderQty    Int      @default(0)
+  lastCountedAt DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  stockMovements StockMovement[]
+  stockAlerts    StockAlert[]
+  stockCountItems StockCountItem[]
+
+  @@unique([productId, warehouseId])
+  @@map("inventory_items")
+}
+
+model StockMovement {
+  id            String            @id @default(cuid())
+  productId     String
+  product       Product           @relation(fields: [productId], references: [id], onDelete: Cascade)
+  inventoryId   String
+  inventory     InventoryItem     @relation(fields: [inventoryId], references: [id], onDelete: Cascade)
+  type          StockMovementType
+  quantity      Int
+  reason        String?
+  reference     String? // Order ID, PO ID, Transfer ID, etc.
+  referenceType String? // "order", "purchase_order", "adjustment", "transfer", etc.
+  transferId    String?
+  transfer      StockTransfer?    @relation(fields: [transferId], references: [id], onDelete: SetNull)
+  createdAt     DateTime          @default(now())
+  createdBy     String?
+
+  @@map("stock_movements")
+}
+
+enum StockMovementType {
+  IN
+  OUT
+  ADJUSTMENT
+  RETURN
+  DAMAGE
+  TRANSFER
+}
+
+model StockAlert {
+  id          String   @id @default(cuid())
+  inventoryId String
+  inventory   InventoryItem @relation(fields: [inventoryId], references: [id], onDelete: Cascade)
+  type        StockAlertType
+  message     String
+  isResolved  Boolean  @default(false)
+  resolvedAt  DateTime?
+  createdAt   DateTime @default(now())
+
+  @@map("stock_alerts")
+}
+
+enum StockAlertType {
+  LOW_STOCK
+  OUT_OF_STOCK
+  OVERSTOCK
+  EXPIRING
+}
+
+model StockCount {
+  id            String        @id @default(cuid())
+  countNumber   String        @unique
+  location      String?
+  status        StockCountStatus @default(DRAFT)
+  startedAt     DateTime?
+  completedAt   DateTime?
+  createdBy     String?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  items         StockCountItem[]
+
+  @@map("stock_counts")
+}
+
+model StockCountItem {
+  id            String        @id @default(cuid())
+  stockCountId  String
+  stockCount    StockCount    @relation(fields: [stockCountId], references: [id], onDelete: Cascade)
+  inventoryId   String
+  inventory     InventoryItem @relation(fields: [inventoryId], references: [id])
+  expectedQty   Int
+  countedQty    Int
+  variance      Int           // countedQty - expectedQty
+  notes         String?       @db.Text
+  createdAt     DateTime      @default(now())
+
+  @@map("stock_count_items")
+}
+
+enum StockCountStatus {
+  DRAFT
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+model StockTransfer {
+  id              String   @id @default(cuid())
+  transferNumber  String   @unique
+  sourceWarehouseId String
+  sourceWarehouse   Warehouse @relation("SourceWarehouse", fields: [sourceWarehouseId], references: [id])
+  destWarehouseId   String
+  destWarehouse     Warehouse @relation("DestinationWarehouse", fields: [destWarehouseId], references: [id])
+  status          TransferStatus @default(PENDING)
+  requestedBy     String?
+  requestedAt     DateTime @default(now())
+  confirmedBy     String?
+  confirmedAt     DateTime?
+  notes           String?  @db.Text
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  items           StockTransferItem[]
+  stockMovements  StockMovement[]
+
+  @@map("stock_transfers")
+}
+
+model StockTransferItem {
+  id              String   @id @default(cuid())
+  transferId      String
+  transfer        StockTransfer @relation(fields: [transferId], references: [id], onDelete: Cascade)
+  productId       String
+  product         Product  @relation(fields: [productId], references: [id])
+  quantity        Int
+  receivedQty     Int      @default(0)
+  createdAt       DateTime @default(now())
+
+  @@map("stock_transfer_items")
+}
+
+enum TransferStatus {
+  PENDING
+  IN_TRANSIT
+  COMPLETED
+  CANCELLED
+}
+
+model Supplier {
+  id          String   @id @default(cuid())
+  name        String
+  email       String
+  phone       String?
+  address     String?
+  contactPerson String?
+  notes       String?  @db.Text
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  purchaseOrders PurchaseOrder[]
+
+  @@map("suppliers")
+}
+
+model PurchaseOrder {
+  id            String   @id @default(cuid())
+  poNumber      String   @unique
+  supplierId    String
+  supplier      Supplier @relation(fields: [supplierId], references: [id])
+  status        POStatus @default(PENDING)
+  orderDate     DateTime @default(now())
+  expectedDate  DateTime?
+  receivedDate  DateTime?
+  subtotal      Decimal  @db.Decimal(10, 2)
+  tax           Decimal  @db.Decimal(10, 2)
+  shipping      Decimal  @db.Decimal(10, 2)
+  total         Decimal  @db.Decimal(10, 2)
+  notes         String?  @db.Text
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  items         PurchaseOrderItem[]
+
+  @@map("purchase_orders")
+}
+
+model PurchaseOrderItem {
+  id             String        @id @default(cuid())
+  purchaseOrderId String
+  purchaseOrder  PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  productId      String
+  product        Product       @relation(fields: [productId], references: [id])
+  quantity       Int
+  unitPrice      Decimal       @db.Decimal(10, 2)
+  discount       Decimal       @default(0) @db.Decimal(10, 2)
+  subtotal       Decimal       @db.Decimal(10, 2)
+  receivedQty    Int           @default(0)
+  createdAt      DateTime      @default(now())
+
+  @@map("purchase_order_items")
+}
+
+enum POStatus {
+  PENDING
+  ORDERED
+  PARTIALLY_RECEIVED
+  RECEIVED
+  CANCELLED
+}
+
+// ==================== CLIENTS ====================
+
+model Client {
+  id                  String   @id @default(cuid())
+  name                String
+  email               String   @unique
+  password            String?  // Optional - for clients who want to log in
+  phone               String?
+  address             String?
+  city                String?
+  country             String?
+  company             String?
+  taxId               String?
+  notes               String?  @db.Text
+  isActive            Boolean  @default(true)
+  loyaltyPointsBalance Int     @default(0)
+  loyaltyTier         String?
+  referralCode        String?  @unique
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  orders              Order[]
+  quotes              Quote[]
+  analytics           ClientAnalytics[]
+  opportunities       Opportunity[]
+  loyaltyPoints       LoyaltyPoints[]
+  reviews             ProductReview[]
+
+  @@map("clients")
+}
+
+// ==================== ORDERS ====================
+
+model Order {
+  id              String      @id @default(cuid())
+  orderNumber     String      @unique
+  clientId        String?
+  client          Client?     @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  userId          String?     // Admin user who created the order
+  user            User?       @relation(fields: [userId], references: [id], onDelete: SetNull)
+  paymentMethodId String?
+  paymentMethod   PaymentMethod? @relation(fields: [paymentMethodId], references: [id], onDelete: SetNull)
+  status          OrderStatus @default(PENDING)
+  paymentStatus   PaymentStatus @default(PENDING)
+  subtotal        Decimal     @db.Decimal(10, 2)
+  tax             Decimal     @db.Decimal(10, 2)
+  shipping        Decimal     @db.Decimal(10, 2)
+  discount        Decimal     @default(0) @db.Decimal(10, 2)
+  total           Decimal     @db.Decimal(10, 2)
+  shippingAddress Json?       // Full shipping address object
+  billingAddress  Json?       // Full billing address object
+  notes           String?     @db.Text
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  shippedAt       DateTime?
+  deliveredAt     DateTime?
+  cancelledAt     DateTime?
+
+  items           OrderItem[]
+  returnRequests  ReturnRequest[]
+  deliveryNotes   DeliveryNote[]
+  paymentTransactions PaymentTransaction[]
+  loyaltyPoints   LoyaltyPoints[]
+
+  @@map("orders")
+}
+
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  PROCESSING
+  SHIPPED
+  DELIVERED
+  CANCELLED
+  REFUNDED
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  PARTIALLY_PAID
+  REFUNDED
+  FAILED
+}
+
+model OrderItem {
+  id          String   @id @default(cuid())
+  orderId     String
+  order       Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId   String
+  product     Product  @relation(fields: [productId], references: [id])
+  quantity    Int
+  unitPrice   Decimal  @db.Decimal(10, 2)
+  discount    Decimal  @default(0) @db.Decimal(10, 2)
+  subtotal    Decimal  @db.Decimal(10, 2)
+  createdAt   DateTime @default(now())
+
+  @@map("order_items")
+}
+
+model ReturnRequest {
+  id          String         @id @default(cuid())
+  orderId     String
+  order       Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  reason      String
+  status      ReturnStatus   @default(PENDING)
+  refundAmount Decimal?      @db.Decimal(10, 2)
+  notes       String?        @db.Text
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+  processedAt DateTime?
+
+  @@map("return_requests")
+}
+
+enum ReturnStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  PROCESSED
+  REFUNDED
+}
+
+model DeliveryNote {
+  id          String   @id @default(cuid())
+  orderId     String
+  order       Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  noteNumber  String   @unique
+  driverName  String?
+  vehicleInfo String?
+  deliveredAt DateTime?
+  signature   String?  // Base64 signature image
+  notes       String?  @db.Text
+  createdAt   DateTime @default(now())
+
+  @@map("delivery_notes")
+}
+
+// ==================== SALES ====================
+
+model Quote {
+  id          String      @id @default(cuid())
+  quoteNumber String      @unique
+  clientId    String?
+  client      Client?     @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  clientName  String
+  clientEmail String
+  clientPhone String?
+  clientAddress String?
+  status      QuoteStatus @default(DRAFT)
+  subtotal    Decimal     @db.Decimal(10, 2)
+  tax         Decimal     @db.Decimal(10, 2)
+  discount    Decimal     @default(0) @db.Decimal(10, 2)
+  total       Decimal     @db.Decimal(10, 2)
+  validUntil  DateTime
+  notes       String?     @db.Text
+  terms       String?     @db.Text
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  convertedAt DateTime?   // When converted to order
+
+  items       QuoteItem[]
+  opportunities Opportunity[]
+
+  @@map("quotes")
+}
+
+enum QuoteStatus {
+  DRAFT
+  SENT
+  ACCEPTED
+  REJECTED
+  EXPIRED
+  CONVERTED
+}
+
+model QuoteItem {
+  id          String   @id @default(cuid())
+  quoteId     String
+  quote       Quote    @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+  productId   String
+  product     Product  @relation(fields: [productId], references: [id])
+  productName String
+  sku         String
+  quantity    Int
+  unitPrice   Decimal  @db.Decimal(10, 2)
+  discount    Decimal  @default(0) @db.Decimal(10, 2)
+  subtotal    Decimal  @db.Decimal(10, 2)
+  createdAt   DateTime @default(now())
+
+  @@map("quote_items")
+}
+
+model Opportunity {
+  id          String            @id @default(cuid())
+  title       String
+  clientId    String?
+  client      Client?           @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  quoteId     String?
+  quote       Quote?            @relation(fields: [quoteId], references: [id], onDelete: SetNull)
+  stage       OpportunityStage  @default(LEAD)
+  value       Decimal           @db.Decimal(10, 2)
+  probability Int               @default(0) // 0-100
+  expectedCloseDate DateTime?
+  assignedTo  String?           // User ID
+  notes       String?           @db.Text
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  @@map("opportunities")
+}
+
+enum OpportunityStage {
+  LEAD
+  QUALIFIED
+  PROPOSAL
+  NEGOTIATION
+  CLOSED_WON
+  CLOSED_LOST
+}
+
+model SalesTeamMember {
+  id          String   @id @default(cuid())
+  userId      String   @unique
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title       String
+  department  String?
+  target      Decimal? @db.Decimal(10, 2)
+  commission  Decimal? @db.Decimal(5, 2) // Percentage
+  isActive    Boolean  @default(true)
+  joinedAt    DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("sales_team_members")
+}
+
+// ==================== MARKETING ====================
+
+model Campaign {
+  id          String         @id @default(cuid())
+  name        String
+  type        CampaignType
+  status      CampaignStatus @default(DRAFT)
+  startDate   DateTime?
+  endDate     DateTime?
+  budget      Decimal?       @db.Decimal(10, 2)
+  spent       Decimal        @default(0) @db.Decimal(10, 2)
+  description String?        @db.Text
+  metadata    Json?          // Additional campaign data
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  @@map("campaigns")
+}
+
+enum CampaignType {
+  EMAIL
+  SMS
+  SOCIAL_MEDIA
+  ADVERTISEMENT
+  PROMOTION
+  OTHER
+}
+
+enum CampaignStatus {
+  DRAFT
+  SCHEDULED
+  ACTIVE
+  PAUSED
+  COMPLETED
+  CANCELLED
+}
+
+// ==================== ANALYTICS ====================
+
+model ProductAnalytics {
+  id          String   @id @default(cuid())
+  productId   String
+  product     Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  date        DateTime @default(now())
+  views       Int      @default(0)
+  sales       Int      @default(0)
+  revenue     Decimal  @default(0) @db.Decimal(10, 2)
+
+  @@map("product_analytics")
+}
+
+model ClientAnalytics {
+  id          String   @id @default(cuid())
+  clientId    String
+  client      Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  date        DateTime @default(now())
+  orders      Int      @default(0)
+  revenue     Decimal  @default(0) @db.Decimal(10, 2)
+  lifetimeValue Decimal @default(0) @db.Decimal(10, 2)
+
+  @@map("client_analytics")
+}
+
+// ==================== SETTINGS ====================
+
+model Setting {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     Json     // Flexible value storage
+  category  String?  // e.g., "theme", "general", "payment", etc.
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("settings")
+}
+
+// ==================== PAYMENTS ====================
+
+model PaymentMethod {
+  id          String   @id @default(cuid())
+  name        String   // Display name (e.g., "M-Pesa Business", "Stripe Production")
+  type        PaymentMethodType
+  isActive    Boolean  @default(true)
+  isDefault   Boolean  @default(false)
+  credentials Json     // Encrypted credentials (API keys, secrets, etc.)
+  config      Json?    // Additional configuration (webhook URLs, callback URLs, etc.)
+  description String?  @db.Text
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  orders      Order[]
+  transactions PaymentTransaction[]
+
+  @@map("payment_methods")
+}
+
+enum PaymentMethodType {
+  MPESA
+  STRIPE
+  PAYPAL
+  BANK_TRANSFER
+  CASH_ON_DELIVERY
+  OTHER
+}
+
+model PaymentTransaction {
+  id              String   @id @default(cuid())
+  orderId         String
+  order           Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  paymentMethodId String
+  paymentMethod   PaymentMethod @relation(fields: [paymentMethodId], references: [id])
+  transactionId   String?  @unique // Gateway transaction ID
+  amount          Decimal  @db.Decimal(10, 2)
+  currency        String   @default("KES")
+  status          PaymentTransactionStatus @default(PENDING)
+  gatewayResponse Json?    // Raw response from payment gateway
+  failureReason   String?  @db.Text
+  paidAt          DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@map("payment_transactions")
+}
+
+enum PaymentTransactionStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+  REFUNDED
+}
+
+// ==================== NOTIFICATIONS ====================
+
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String?
+  user      User?            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      NotificationType
+  title     String
+  message   String
+  link      String?
+  isRead    Boolean          @default(false)
+  readAt    DateTime?
+  metadata  Json?            // Additional notification data
+  createdAt DateTime         @default(now())
+
+  @@map("notifications")
+}
+
+enum NotificationType {
+  ORDER
+  INVENTORY
+  STOCK_ALERT
+  QUOTE
+  SYSTEM
+  MARKETING
+  OTHER
+}
+
+// ==================== HERO IMAGES ====================
+
+model HeroImage {
+  id          String   @id @default(cuid())
+  imageUrl    String
+  title       String?
+  subtitle    String?
+  ctaText     String?
+  ctaLink     String?
+  isActive    Boolean  @default(false)
+  priority    Int      @default(0)
+  startDate   DateTime?
+  endDate     DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([isActive, priority])
+  @@index([startDate, endDate])
+  @@map("hero_images")
+}
+
+// ==================== PRODUCT REVIEWS ====================
+
+model ProductReview {
+  id          String      @id @default(cuid())
+  productId   String
+  product     Product     @relation(fields: [productId], references: [id], onDelete: Cascade)
+  clientId    String?
+  client      Client?     @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  customerName String?    // For anonymous reviews
+  customerEmail String?   // For anonymous reviews
+  rating      Int         // 1-5
+  comment     String?     @db.Text
+  status      ReviewStatus @default(PENDING)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  @@index([productId])
+  @@index([clientId])
+  @@index([status])
+  @@index([rating])
+  @@map("product_reviews")
+}
+
+enum ReviewStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+// ==================== LOYALTY PROGRAMS ====================
+
+model LoyaltyProgram {
+  id          String      @id @default(cuid())
+  name        String
+  description String?     @db.Text
+  type        LoyaltyType
+  isActive    Boolean     @default(true)
+  rules       Json        // Flexible rules storage (pointsPerDollar, redemptionRate, tiers, etc.)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  @@map("loyalty_programs")
+}
+
+enum LoyaltyType {
+  POINTS
+  TIER
+  CASHBACK
+}
+
+model LoyaltyPoints {
+  id          String      @id @default(cuid())
+  clientId    String
+  client      Client      @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  points      Int         // Positive for earned, negative for redeemed
+  type        PointsType
+  orderId     String?
+  order       Order?      @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  description String?
+  createdAt   DateTime    @default(now())
+
+  @@index([clientId])
+  @@index([createdAt])
+  @@index([orderId])
+  @@map("loyalty_points")
+}
+
+enum PointsType {
+  EARNED
+  REDEEMED
+  EXPIRED
+  ADJUSTED
+  BONUS
+}
